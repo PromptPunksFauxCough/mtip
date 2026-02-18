@@ -1,0 +1,102 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 600
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          android: false
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config autoconf libtool ccache make cmake gcc g++ git curl lbzip2 libtinfo5 gperf unzip python-is-python3 llvm
+
+      - name: Checkout monero_c
+        uses: actions/checkout@v4
+        with:
+          repository: MrCyjaneK/monero_c
+          ref: develop
+          submodules: recursive
+          path: monero_c
+
+      - name: Apply patches
+        working-directory: monero_c
+        run: |
+          GIT_AUTHOR_NAME="CI" GIT_AUTHOR_EMAIL="ci@example.com" \
+          GIT_COMMITTER_NAME="CI" GIT_COMMITTER_EMAIL="ci@example.com" \
+          ./apply_patches.sh monero
+
+      - name: Build and collect libraries
+        run: |
+          mkdir -p app/src/main/jniLibs/armeabi-v7a
+          mkdir -p app/src/main/jniLibs/arm64-v8a
+          mkdir -p app/src/main/jniLibs/x86_64
+
+          cd monero_c
+          ./build_single.sh monero armv7a-linux-androideabi -j$(nproc)
+          find . -path "*armv7a-linux-androideabi*" -name "libwallet2_api_c.so" -exec mv {} ../app/src/main/jniLibs/armeabi-v7a/ \;
+          rm -rf release build contrib/depends/built contrib/depends/sources
+
+          ./build_single.sh monero aarch64-linux-android -j$(nproc)
+          find . -path "*aarch64-linux-android*" -name "libwallet2_api_c.so" -exec mv {} ../app/src/main/jniLibs/arm64-v8a/ \;
+          rm -rf release build contrib/depends/built contrib/depends/sources
+
+          ./build_single.sh monero x86_64-linux-android -j$(nproc)
+          find . -path "*x86_64-linux-android*" -name "libwallet2_api_c.so" -exec mv {} ../app/src/main/jniLibs/x86_64/ \;
+          cd ..
+          rm -rf monero_c
+          
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: liberica
+          java-version: 17
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build APK
+        run: gradle assembleDebug
+
+      - name: Delete existing latest release
+        uses: dev-drprasad/delete-tag-and-release@v1.0
+        with:
+          tag_name: latest
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_release: true
+        continue-on-error: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: latest
+          name: Latest Build
+          files: |
+            app/build/outputs/apk/debug/app-debug.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
